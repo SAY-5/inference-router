@@ -23,8 +23,18 @@ void log_at(LogLevel level, const char* fmt, Args... args) {
     }
     std::lock_guard<std::mutex> lock(detail::log_mutex());
     std::fprintf(stderr, "[%s] ", detail::level_name(level));
-    // NOLINTNEXTLINE(cert-err33-c)
-    std::fprintf(stderr, fmt, args...);
+    // -Wformat-security wants the format string to be a literal; ours is a parameter
+    // here, but that parameter is always a literal at the call site (the macros below
+    // never pass a runtime-constructed string). Suppress the warning on this line only.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-security"
+    if constexpr (sizeof...(Args) == 0) {
+        std::fputs(fmt, stderr);
+    } else {
+        // NOLINTNEXTLINE(cert-err33-c)
+        std::fprintf(stderr, fmt, args...);
+    }
+#pragma GCC diagnostic pop
     std::fputc('\n', stderr);
 }
 
