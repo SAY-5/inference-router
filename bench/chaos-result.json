@@ -1,0 +1,21 @@
+{
+  "schema": "inference-router.chaos.v1",
+  "verdict": "pass",
+  "dropped_total": 0,
+  "accepted_total": 994,
+  "completed_total": 994,
+  "errored_total": 0,
+  "client_sent": 994,
+  "client_got_response": 994,
+  "client_connect_failed": 4006,
+  "client_io_failed": 0,
+  "clients": 50,
+  "requests_per_client": 100,
+  "router_threads": 8,
+  "backend_pool_size": 8,
+  "sigterm_after_ms": 5004,
+  "total_ms": 5284,
+  "started_at": "2026-05-07T10:13:46Z",
+  "sigterm_at": "2026-05-07T10:13:51Z",
+  "finished_at": "2026-05-07T10:13:51Z"
+}

@@ -1,0 +1,33 @@
+version: "3.9"
+services:
+  backend-1:
+    build: .
+    image: inference-router:local
+    entrypoint: ["/usr/local/bin/backend-echo"]
+    command: ["--port", "9090"]
+    networks: [routernet]
+
+  backend-2:
+    image: inference-router:local
+    entrypoint: ["/usr/local/bin/backend-echo"]
+    command: ["--port", "9090"]
+    depends_on: [backend-1]
+    networks: [routernet]
+
+  backend-3:
+    image: inference-router:local
+    entrypoint: ["/usr/local/bin/backend-echo"]
+    command: ["--port", "9090"]
+    depends_on: [backend-1]
+    networks: [routernet]
+
+  router:
+    image: inference-router:local
+    depends_on: [backend-1, backend-2, backend-3]
+    command: ["--listen", "0.0.0.0:8080", "--backend", "backend-1:9090", "--threads", "8", "--pool-size", "16"]
+    ports:
+      - "8080:8080"
+    networks: [routernet]
+
+networks:
+  routernet:

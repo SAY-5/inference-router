@@ -1,0 +1,112 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  format-check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install -y clang-format-15
+      - name: Check formatting
+        run: |
+          shopt -s globstar
+          clang-format-15 --dry-run -Werror src/**/*.cpp src/**/*.h tools/**/*.cpp tests/**/*.cpp bench/**/*.cpp
+
+  build-release:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [g++, clang++]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake clang
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+      - name: Build
+        run: cmake --build build -j
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure --timeout 90
+
+  build-asan:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake
+      - name: Configure ASan
+        run: cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DIR_ENABLE_ASAN=ON
+      - name: Build
+        run: cmake --build build-asan -j
+      - name: Run tests under ASan/UBSan
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build-asan --output-on-failure --timeout 120
+
+  chaos-smoke:
+    runs-on: ubuntu-22.04
+    needs: build-release
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j --target chaos
+      - name: Run chaos smoke (10 clients x 50 requests, drain at t=1.5s)
+        run: |
+          mkdir -p bench
+          ./build/chaos --clients 10 --requests 50 --sigterm-after-ms 1500 \
+            --threads 4 --pool-size 4 --shutdown-grace 30000 \
+            --out bench/chaos-smoke.json
+          cat bench/chaos-smoke.json
+      - name: Assert dropped == 0
+        run: |
+          dropped=$(grep -o '"dropped_total": [0-9]*' bench/chaos-smoke.json | awk '{print $2}')
+          echo "dropped=$dropped"
+          test "$dropped" = "0"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chaos-smoke
+          path: bench/chaos-smoke.json
+
+  bench-smoke:
+    runs-on: ubuntu-22.04
+    needs: build-release
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j --target load_bench
+      - name: Run small bench
+        run: |
+          mkdir -p bench
+          ./build/load_bench --concurrency 8 --requests 1000 --payload-bytes 64 \
+            --out bench/bench-smoke.json
+          cat bench/bench-smoke.json
+      - name: Assert JSON shape
+        run: |
+          grep -q '"throughput_rps":' bench/bench-smoke.json
+          grep -q '"p99_us":' bench/bench-smoke.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-smoke
+          path: bench/bench-smoke.json

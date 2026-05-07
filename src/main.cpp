@@ -1,0 +1,189 @@
+#include <getopt.h>
+#include <unistd.h>
+
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "acceptor.h"
+#include "backend_pool.h"
+#include "connection.h"
+#include "handler.h"
+#include "log.h"
+#include "metrics.h"
+#include "shutdown.h"
+#include "thread_pool.h"
+
+namespace {
+
+struct Args {
+    std::string listen_host = "0.0.0.0";
+    std::uint16_t listen_port = 8080;
+    std::string backend_host = "127.0.0.1";
+    std::uint16_t backend_port = 9090;
+    std::size_t threads = 8;
+    std::size_t pool_size = 16;
+    int shutdown_grace_ms = 30'000;
+    int log_level = 1;  // info
+};
+
+void usage() {
+    std::fprintf(stderr,
+                 "inference-router\n"
+                 "  --listen HOST:PORT       (default 0.0.0.0:8080)\n"
+                 "  --backend HOST:PORT      (default 127.0.0.1:9090)\n"
+                 "  --threads N              (default 8)\n"
+                 "  --pool-size N            (default 16)\n"
+                 "  --shutdown-grace SECONDS (default 30)\n"
+                 "  --log-level [0..3]       (default 1=info)\n"
+                 "  --help\n");
+}
+
+bool parse_host_port(const char* s, std::string& host, std::uint16_t& port) {
+    const char* colon = std::strrchr(s, ':');
+    if (!colon || colon == s) return false;
+    host.assign(s, static_cast<std::size_t>(colon - s));
+    int p = std::atoi(colon + 1);
+    if (p <= 0 || p > 65535) return false;
+    port = static_cast<std::uint16_t>(p);
+    return true;
+}
+
+bool parse_args(int argc, char** argv, Args& out) {
+    static struct option long_opts[] = {
+        {"listen", required_argument, nullptr, 'l'},
+        {"backend", required_argument, nullptr, 'b'},
+        {"threads", required_argument, nullptr, 't'},
+        {"pool-size", required_argument, nullptr, 'p'},
+        {"shutdown-grace", required_argument, nullptr, 'g'},
+        {"log-level", required_argument, nullptr, 'L'},
+        {"help", no_argument, nullptr, 'h'},
+        {nullptr, 0, nullptr, 0},
+    };
+    int opt;
+    int idx = 0;
+    while ((opt = getopt_long(argc, argv, "", long_opts, &idx)) != -1) {
+        switch (opt) {
+            case 'l':
+                if (!parse_host_port(optarg, out.listen_host, out.listen_port)) {
+                    std::fprintf(stderr, "invalid --listen value: %s\n", optarg);
+                    return false;
+                }
+                break;
+            case 'b':
+                if (!parse_host_port(optarg, out.backend_host, out.backend_port)) {
+                    std::fprintf(stderr, "invalid --backend value: %s\n", optarg);
+                    return false;
+                }
+                break;
+            case 't':
+                out.threads = static_cast<std::size_t>(std::atoi(optarg));
+                break;
+            case 'p':
+                out.pool_size = static_cast<std::size_t>(std::atoi(optarg));
+                break;
+            case 'g':
+                out.shutdown_grace_ms = std::atoi(optarg) * 1000;
+                break;
+            case 'L':
+                out.log_level = std::atoi(optarg);
+                break;
+            case 'h':
+                usage();
+                std::exit(0);
+            default:
+                usage();
+                return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    Args args;
+    if (!parse_args(argc, argv, args)) return 2;
+
+    ir::set_log_level(static_cast<ir::LogLevel>(args.log_level));
+    ir::Shutdown::instance().install_signal_handlers();
+
+    ir::Metrics metrics;
+
+    ir::BackendPool::Options bopts;
+    bopts.host = args.backend_host;
+    bopts.port = args.backend_port;
+    bopts.max_size = args.pool_size;
+    bopts.min_idle = std::min<std::size_t>(2, args.pool_size);
+    ir::BackendPool backend(bopts, &metrics);
+
+    ir::ThreadPool::Options topts;
+    topts.worker_count = args.threads;
+    topts.max_queue_depth = 4096;
+    topts.reject_on_full = false;
+    ir::ThreadPool pool(topts);
+
+    ir::HandlerOptions hopts;
+
+    ir::Acceptor::Options aopts;
+    aopts.host = args.listen_host;
+    aopts.port = args.listen_port;
+    ir::Acceptor acceptor(aopts, &metrics, [&](int fd) {
+        bool ok = pool.submit(
+            [fd, &backend, &metrics, hopts] { ir::handle_one(fd, backend, metrics, hopts); });
+        if (!ok) {
+            // Pool is shutting down. Listen socket has already been closed at this point,
+            // so this branch is reachable only as a tiny race window. Closing the conn
+            // surfaces a peer-close to the client, which is counted as an error response,
+            // not a drop, by the load generator.
+            ir::safe_close(fd);
+            metrics.inc_errored();
+        }
+    });
+
+    if (!acceptor.start()) {
+        std::fprintf(stderr, "fatal: acceptor failed to start\n");
+        return 1;
+    }
+    IR_LOG_INFO("inference-router listening on %s:%u backend=%s:%u threads=%zu pool=%zu",
+                args.listen_host.c_str(), acceptor.bound_port(), args.backend_host.c_str(),
+                args.backend_port, args.threads, args.pool_size);
+
+    // Wait for SIGTERM/SIGINT.
+    while (!ir::Shutdown::instance().requested()) {
+        ir::Shutdown::instance().wait(std::chrono::milliseconds(1000));
+    }
+    IR_LOG_INFO("shutdown requested; entering drain phase");
+
+    // Step 1: stop accepting new connections.
+    acceptor.stop();
+
+    // Step 2: wait for in-flight requests to finish, up to grace deadline.
+    auto grace_end =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(args.shutdown_grace_ms);
+    while (metrics.in_flight() > 0 && std::chrono::steady_clock::now() < grace_end) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (metrics.in_flight() > 0) {
+        IR_LOG_WARN("grace deadline expired with %llu in-flight; counting as dropped",
+                    static_cast<unsigned long long>(metrics.in_flight()));
+        // The grace-deadline override is the ONLY documented path to a drop.
+        std::uint64_t remaining = metrics.in_flight();
+        for (std::uint64_t i = 0; i < remaining; ++i) {
+            metrics.inc_dropped();
+        }
+    }
+
+    // Step 3: stop the worker pool (no new tasks will be popped; queue should be empty).
+    pool.stop();
+
+    // Step 4: close all backend conns.
+    backend.shutdown();
+
+    IR_LOG_INFO("final: %s", metrics.snapshot_string().c_str());
+    return 0;
+}

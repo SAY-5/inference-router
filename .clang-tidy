@@ -1,0 +1,22 @@
+---
+Checks: >
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  performance-*,
+  readability-identifier-naming,
+  -readability-identifier-length,
+  modernize-use-nullptr,
+  modernize-use-override,
+  cppcoreguidelines-pro-type-member-init
+WarningsAsErrors: ''
+HeaderFilterRegex: '^src/.*\.h$'
+CheckOptions:
+  - key: readability-identifier-naming.ClassCase
+    value: CamelCase
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case
+  - key: readability-identifier-naming.PrivateMemberSuffix
+    value: _
