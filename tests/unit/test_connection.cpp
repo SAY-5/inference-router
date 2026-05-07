@@ -93,7 +93,9 @@ TEST(Connection, ReadTimeoutFiresWhenNoData) {
 }
 
 TEST(Connection, LargeMessageStreamedThroughChunks) {
-    auto [a, b] = socket_pair();
+    auto pair = socket_pair();
+    int a = pair.first;
+    int b = pair.second;
     ASSERT_GE(a, 0);
 
     // 1 MiB payload — ensures multiple recv() calls in read_exact.
@@ -102,7 +104,7 @@ TEST(Connection, LargeMessageStreamedThroughChunks) {
         payload[i] = static_cast<std::uint8_t>(i & 0xFF);
     }
 
-    std::thread writer([&] {
+    std::thread writer([a, &payload] {
         auto wr = ir::write_message(a, payload, 5000);
         EXPECT_EQ(wr, ir::IoStatus::kOk);
         ir::safe_close(a);
