@@ -1,0 +1,21 @@
+{
+  "schema": "inference-router.bench.v2",
+  "mode": "clients",
+  "ok": 500000,
+  "err": 0,
+  "connects": 500000,
+  "connect_failed": 0,
+  "total_ms": 322428,
+  "throughput_rps": 1550.73,
+  "connect_rate_per_s": 1550.73,
+  "p50_us": 6447054,
+  "p95_us": 6457652,
+  "p99_us": 6460740,
+  "p999_us": 6465049,
+  "concurrency": 8,
+  "clients": 10000,
+  "reqs_per_client": 50,
+  "router_threads": 64,
+  "router_pool": 512,
+  "payload_bytes": 64
+}
