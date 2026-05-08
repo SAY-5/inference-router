@@ -44,6 +44,7 @@ add_library(ir_core STATIC
     src/connection.cpp
     src/thread_pool.cpp
     src/backend_pool.cpp
+    src/backend_set.cpp
     src/acceptor.cpp
     src/handler.cpp
     src/shutdown.cpp
@@ -83,6 +84,7 @@ if(IR_BUILD_TESTS)
         tests/unit/test_thread_pool.cpp
         tests/unit/test_metrics.cpp
         tests/unit/test_backend_pool.cpp
+        tests/unit/test_backend_set.cpp
     )
     target_compile_options(unit_tests PRIVATE ${IR_TEST_WARN_FLAGS})
     target_link_libraries(unit_tests PRIVATE ir_core GTest::gtest_main)

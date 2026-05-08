@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "backend_pool.h"
+#include "backend_set.h"
 #include "connection.h"
 #include "log.h"
 #include "metrics.h"
@@ -91,6 +92,75 @@ void handle_one(int client_fd, BackendPool& backend, Metrics& metrics, const Han
     responded = true;
     (void)responded;
     (void)errored;
+    safe_close(client_fd);
+    metrics.dec_in_flight();
+}
+
+// BackendSet overload. Mirrors handle_one(BackendPool&) above but borrows from
+// the weighted-least-conn set. Kept as a separate function (not delegating)
+// because the borrow/release types differ (Handle vs raw fd) and the indirection
+// would be more confusing than the duplication.
+void handle_one(int client_fd, BackendSet& backend_set, Metrics& metrics,
+                const HandlerOptions& opts) {
+    metrics.inc_in_flight();
+
+    std::vector<std::uint8_t> req;
+    auto r = read_message(client_fd, req, opts.max_payload, opts.client_io_timeout_ms);
+    if (r != IoStatus::kOk) {
+        IR_LOG_DEBUG("client read failed: %s", io_status_name(r));
+        metrics.inc_errored();
+        safe_close(client_fd);
+        metrics.dec_in_flight();
+        return;
+    }
+
+    auto handle = backend_set.borrow();
+    if (handle.fd < 0) {
+        IR_LOG_WARN("backend_set borrow failed errno=%d", errno);
+        reply_error(client_fd, "ERR backend unavailable", opts.client_io_timeout_ms);
+        metrics.inc_errored();
+        safe_close(client_fd);
+        metrics.dec_in_flight();
+        return;
+    }
+
+    bool conn_ok = true;
+    auto wr = write_message(handle.fd, req.data(), req.size(), opts.backend_io_timeout_ms);
+    if (wr != IoStatus::kOk) {
+        IR_LOG_DEBUG("backend write failed: %s", io_status_name(wr));
+        conn_ok = false;
+        reply_error(client_fd, "ERR backend write", opts.client_io_timeout_ms);
+        backend_set.release(handle, false);
+        metrics.inc_errored();
+        safe_close(client_fd);
+        metrics.dec_in_flight();
+        return;
+    }
+
+    std::vector<std::uint8_t> resp;
+    auto rr = read_message(handle.fd, resp, opts.max_payload, opts.backend_io_timeout_ms);
+    if (rr != IoStatus::kOk) {
+        IR_LOG_DEBUG("backend read failed: %s", io_status_name(rr));
+        conn_ok = false;
+        reply_error(client_fd, "ERR backend read", opts.client_io_timeout_ms);
+        backend_set.release(handle, false);
+        metrics.inc_errored();
+        safe_close(client_fd);
+        metrics.dec_in_flight();
+        return;
+    }
+
+    auto cw = write_message(client_fd, resp.data(), resp.size(), opts.client_io_timeout_ms);
+    backend_set.release(handle, conn_ok);
+    if (cw != IoStatus::kOk) {
+        IR_LOG_DEBUG("client write failed: %s", io_status_name(cw));
+        metrics.inc_errored();
+        safe_close(client_fd);
+        metrics.dec_in_flight();
+        return;
+    }
+
+    metrics.inc_completed();
     safe_close(client_fd);
     metrics.dec_in_flight();
 }

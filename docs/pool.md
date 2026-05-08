@@ -64,10 +64,54 @@ length it receives, including zero. So the ping is `len=0` out → `len=0` back,
 payload bytes on either side. A real backend would need to grow a similar idle-ping
 contract.
 
+## Multi-backend / weighted-least-conn (BackendSet)
+
+`BackendPool` owns one `(host, port)` pair. For multiple backends with different
+capacities, `BackendSet` (see `src/backend_set.{h,cpp}`) wraps a list of pools
+and a per-pool weight (default 1).
+
+On `borrow()`, the set picks the pool with the smallest *effective load*,
+defined as `in_flight / weight`. Ties are broken by lowest backend index.
+
+```
+pick_lowest_load_():
+  best = 0
+  for i in 1..N:
+    if in_flight[i] * weight[best] < in_flight[best] * weight[i]:
+      best = i
+  return best
+```
+
+The integer cross-multiply avoids float division and is safe for weights up to
+2^32 (in_flight is uint64). Selection reads each pool's atomic snapshot
+without a lock; the borrower then `fetch_add(1)` on the chosen pool. Two
+borrowers can race onto the same "lowest" pool — the discrepancy is bounded by
+concurrent borrow count and self-corrects on the next pick, so we don't
+serialize selection on a global mutex.
+
+### Migration from round-robin
+
+The v2 router took a single `--backend HOST:PORT` flag and used the connection
+pool's idle queue as its only routing primitive (LIFO/FIFO depending on which
+end of the deque was hot). Migration to the v3 weighted-least-conn router is
+strictly additive:
+
+* **No flag change is required.** A single `--backend HOST:PORT` invocation
+  still works; the BackendSet wraps it as a 1-pool weight-1 set, and selection
+  trivially picks index 0 every time.
+* **Repeated `--backend` flags** (e.g. `--backend 10.0.0.1:9090
+  --backend 10.0.0.2:9090:2`) opt into multi-backend, weighted routing.
+  Format is `HOST:PORT[:WEIGHT]`; weight defaults to 1.
+* **Per-pool sizing** (`--pool-size`) applies to each backend independently. A
+  three-backend deployment with `--pool-size 16` keeps up to 48 warm conns
+  total.
+
+The handler API gained a second overload (`handle_one(BackendSet&, ...)`); the
+original `handle_one(BackendPool&, ...)` is unchanged so existing tests, the
+benchmark, and the chaos test still compile and run unmodified.
+
 ## What this pool does not do
 
-- **No per-host weighted routing.** One pool per `(host, port)`. Multi-destination
-  routing would build a thin wrapper that selects a pool per request.
 - **No circuit breaking.** A backend that returns errors fast will still get hammered.
   Adding a half-open / open-circuit state is straightforward but isn't here.
 - **No prepared connections.** Conns aren't pre-warmed to `min_idle` at startup; they

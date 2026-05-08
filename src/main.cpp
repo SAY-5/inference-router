@@ -11,6 +11,7 @@
 
 #include "acceptor.h"
 #include "backend_pool.h"
+#include "backend_set.h"
 #include "connection.h"
 #include "handler.h"
 #include "log.h"
@@ -23,8 +24,10 @@ namespace {
 struct Args {
     std::string listen_host = "0.0.0.0";
     std::uint16_t listen_port = 8080;
-    std::string backend_host = "127.0.0.1";
-    std::uint16_t backend_port = 9090;
+    // Repeatable: each --backend HOST:PORT[:WEIGHT]. If no --backend is given,
+    // defaults to a single 127.0.0.1:9090 backend with weight 1 (i.e. the v2
+    // single-backend, round-robin-via-pool behaviour).
+    std::vector<ir::BackendSet::BackendSpec> backends;
     std::size_t threads = 8;
     std::size_t pool_size = 16;
     int shutdown_grace_ms = 30'000;
@@ -34,12 +37,16 @@ struct Args {
 void usage() {
     std::fprintf(stderr,
                  "inference-router\n"
-                 "  --listen HOST:PORT       (default 0.0.0.0:8080)\n"
-                 "  --backend HOST:PORT      (default 127.0.0.1:9090)\n"
-                 "  --threads N              (default 8)\n"
-                 "  --pool-size N            (default 16)\n"
-                 "  --shutdown-grace SECONDS (default 30)\n"
-                 "  --log-level [0..3]       (default 1=info)\n"
+                 "  --listen HOST:PORT             (default 0.0.0.0:8080)\n"
+                 "  --backend HOST:PORT[:WEIGHT]   (repeatable; default 127.0.0.1:9090 weight=1)\n"
+                 "                                   When more than one --backend is given,\n"
+                 "                                   weighted-least-conn selection routes each\n"
+                 "                                   request to the backend with the lowest\n"
+                 "                                   in_flight/weight. Tie-break: lowest index.\n"
+                 "  --threads N                    (default 8)\n"
+                 "  --pool-size N                  (per-backend pool max; default 16)\n"
+                 "  --shutdown-grace SECONDS       (default 30)\n"
+                 "  --log-level [0..3]             (default 1=info)\n"
                  "  --help\n");
 }
 
@@ -50,6 +57,35 @@ bool parse_host_port(const char* s, std::string& host, std::uint16_t& port) {
     int p = std::atoi(colon + 1);
     if (p <= 0 || p > 65535) return false;
     port = static_cast<std::uint16_t>(p);
+    return true;
+}
+
+// Parse --backend value as `HOST:PORT[:WEIGHT]`. WEIGHT is optional; defaults to 1.
+// Returns false on any parse failure.
+bool parse_backend_spec(const char* s, ir::BackendSet::BackendSpec& out) {
+    // Find the LAST colon. If there are 2 colons, the suffix is WEIGHT and the
+    // middle is PORT; if 1, the suffix is PORT.
+    std::string in(s);
+    auto last_colon = in.rfind(':');
+    if (last_colon == std::string::npos || last_colon == 0) return false;
+    auto first_colon = in.find(':');
+    if (first_colon == last_colon) {
+        // HOST:PORT, weight defaults to 1.
+        out.host = in.substr(0, last_colon);
+        int p = std::atoi(in.c_str() + last_colon + 1);
+        if (p <= 0 || p > 65535) return false;
+        out.port = static_cast<std::uint16_t>(p);
+        out.weight = 1;
+        return true;
+    }
+    // HOST:PORT:WEIGHT
+    out.host = in.substr(0, first_colon);
+    int p = std::atoi(in.c_str() + first_colon + 1);
+    if (p <= 0 || p > 65535) return false;
+    out.port = static_cast<std::uint16_t>(p);
+    int w = std::atoi(in.c_str() + last_colon + 1);
+    if (w < 0) return false;
+    out.weight = static_cast<std::size_t>(w == 0 ? 1 : w);
     return true;
 }
 
@@ -74,12 +110,17 @@ bool parse_args(int argc, char** argv, Args& out) {
                     return false;
                 }
                 break;
-            case 'b':
-                if (!parse_host_port(optarg, out.backend_host, out.backend_port)) {
-                    std::fprintf(stderr, "invalid --backend value: %s\n", optarg);
+            case 'b': {
+                ir::BackendSet::BackendSpec spec;
+                if (!parse_backend_spec(optarg, spec)) {
+                    std::fprintf(stderr,
+                                 "invalid --backend value: %s (expected HOST:PORT[:WEIGHT])\n",
+                                 optarg);
                     return false;
                 }
+                out.backends.push_back(spec);
                 break;
+            }
             case 't':
                 out.threads = static_cast<std::size_t>(std::atoi(optarg));
                 break;
@@ -114,12 +155,15 @@ int main(int argc, char** argv) {
 
     ir::Metrics metrics;
 
-    ir::BackendPool::Options bopts;
-    bopts.host = args.backend_host;
-    bopts.port = args.backend_port;
-    bopts.max_size = args.pool_size;
-    bopts.min_idle = std::min<std::size_t>(2, args.pool_size);
-    ir::BackendPool backend(bopts, &metrics);
+    if (args.backends.empty()) {
+        // Migration default: same as the v2 single-backend behaviour.
+        args.backends.push_back({"127.0.0.1", 9090, 1});
+    }
+
+    ir::BackendPool::Options shared_opts;
+    shared_opts.max_size = args.pool_size;
+    shared_opts.min_idle = std::min<std::size_t>(2, args.pool_size);
+    ir::BackendSet backend_set(args.backends, shared_opts, &metrics);
 
     ir::ThreadPool::Options topts;
     topts.worker_count = args.threads;
@@ -133,8 +177,9 @@ int main(int argc, char** argv) {
     aopts.host = args.listen_host;
     aopts.port = args.listen_port;
     ir::Acceptor acceptor(aopts, &metrics, [&](int fd) {
-        bool ok = pool.submit(
-            [fd, &backend, &metrics, hopts] { ir::handle_one(fd, backend, metrics, hopts); });
+        bool ok = pool.submit([fd, &backend_set, &metrics, hopts] {
+            ir::handle_one(fd, backend_set, metrics, hopts);
+        });
         if (!ok) {
             // Pool is shutting down. Listen socket has already been closed at this point,
             // so this branch is reachable only as a tiny race window. Closing the conn
@@ -149,9 +194,13 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "fatal: acceptor failed to start\n");
         return 1;
     }
-    IR_LOG_INFO("inference-router listening on %s:%u backend=%s:%u threads=%zu pool=%zu",
-                args.listen_host.c_str(), acceptor.bound_port(), args.backend_host.c_str(),
-                args.backend_port, args.threads, args.pool_size);
+    IR_LOG_INFO("inference-router listening on %s:%u backends=%zu threads=%zu pool/backend=%zu",
+                args.listen_host.c_str(), acceptor.bound_port(), args.backends.size(), args.threads,
+                args.pool_size);
+    for (std::size_t i = 0; i < args.backends.size(); ++i) {
+        const auto& b = args.backends[i];
+        IR_LOG_INFO("  backend[%zu] = %s:%u weight=%zu", i, b.host.c_str(), b.port, b.weight);
+    }
 
     // Wait for SIGTERM/SIGINT.
     while (!ir::Shutdown::instance().requested()) {
@@ -182,7 +231,7 @@ int main(int argc, char** argv) {
     pool.stop();
 
     // Step 4: close all backend conns.
-    backend.shutdown();
+    backend_set.shutdown();
 
     IR_LOG_INFO("final: %s", metrics.snapshot_string().c_str());
     return 0;

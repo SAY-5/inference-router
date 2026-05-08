@@ -78,7 +78,8 @@ The CI job `chaos-smoke` enforces `dropped_total == 0` on every push.
 | `src/acceptor.{h,cpp}` | Single-threaded epoll acceptor. Hands new conns to the pool. |
 | `src/thread_pool.{h,cpp}` | Bounded MPMC thread pool (mutex + condvar). |
 | `src/handler.{h,cpp}` | Per-request: read, borrow backend, forward, write. |
-| `src/backend_pool.{h,cpp}` | Connection pool with idle timeout, max lifetime, health check. |
+| `src/backend_pool.{h,cpp}` | Per-`(host,port)` connection pool with idle timeout, max lifetime, health check. |
+| `src/backend_set.{h,cpp}` | Weighted-least-conn router across N backend pools. |
 | `src/connection.{h,cpp}` | Length-prefixed wire protocol + dial/listen helpers. |
 | `src/shutdown.{h,cpp}` | `SIGTERM`/`SIGINT` coordinator + drain. |
 | `src/metrics.{h,cpp}` | Atomic counters (accepted/completed/errored/dropped/in_flight). |
@@ -147,8 +148,8 @@ docker compose up
 - **Not TLS.** Plaintext sockets only. mTLS is a documented swap, not in this repo.
 - **Not Kubernetes-aware.** No service-discovery, no service mesh, no sidecar. The
   backend list is static at startup.
-- **Not weighted/least-conn load balancing.** Round-robin via the pool is the only
-  strategy. Weighted routing is future work.
+- **Not URL-aware routing.** Routing is per-request, not per-path; there is no
+  consistent hashing, header inspection, or path-based mapping.
 - **Not a job/task lifecycle manager.** That belongs to a different repo
   (`SAY-5/job-controller`). This is hot-path *transport*.
 - **Not lock-free.** The thread pool and backend pool both use `std::mutex` + condvar.
