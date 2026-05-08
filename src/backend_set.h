@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -28,12 +29,13 @@ class Metrics;
 //
 // Concurrency
 // -----------
-// Per-backend `in_flight` is an atomic counter incremented inside borrow() and
-// decremented inside release(). Selection reads each pool's counter without a
-// lock, then increments the chosen one with a CAS-equivalent fetch_add. The
-// race window — two threads picking the "same lowest-load" backend — is bounded
-// by the number of concurrent borrowers and self-corrects on the next borrow,
-// so we accept it rather than serialize on a global mutex.
+// Selection (read all `in_flight` counters → pick the smallest score → bump
+// the chosen counter) runs under a small mutex. Without it, two concurrent
+// borrowers can read identical snapshots and both pick the same "lowest" pool,
+// destroying the weighted distribution. The mutex is held only across the
+// pick-and-increment; the actual pool->borrow() call (which may block on
+// dial/idle queue) runs unlocked. Release decrements its counter atomically;
+// it does not need the mutex.
 class BackendSet {
   public:
     struct BackendSpec {
@@ -78,14 +80,17 @@ class BackendSet {
     }
 
   private:
-    std::size_t pick_lowest_load_();
+    std::size_t pick_lowest_load_locked_();  // caller must hold pick_mu_
 
     std::vector<std::unique_ptr<BackendPool>> pools_;
     std::vector<std::size_t> weights_;
-    // Two parallel arrays of atomics; `in_flight_` drives selection,
-    // `handled_` is observability for the LB-distribution test.
+    // `in_flight_` is the load that drives selection; `handled_` is the
+    // observability counter for the LB-distribution test. Both are kept atomic
+    // so release() can decrement without taking pick_mu_.
     std::vector<std::atomic<std::uint64_t>> in_flight_;
     std::vector<std::atomic<std::uint64_t>> handled_;
+    // Serializes the pick-then-bump in borrow(); see class comment.
+    std::mutex pick_mu_;
 };
 
 }  // namespace ir

@@ -28,34 +28,25 @@ BackendSet::~BackendSet() {
     shutdown();
 }
 
-std::size_t BackendSet::pick_lowest_load_() {
+std::size_t BackendSet::pick_lowest_load_locked_() {
     // Find the backend with the smallest effective load (in_flight / weight).
-    // We scale by a common factor to do integer math: load_score = in_flight * MAX_WEIGHT / weight.
-    // To keep this implementation transparent, just compute `lhs * w_rhs vs rhs * w_lhs`
-    // pairwise (same numerical comparison after multiplying through by the product
-    // of weights).
-    //
-    // Tie-break: lowest backend index wins.
-    if (pools_.empty()) {
-        return 0;
-    }
+    // Compare pairs by cross-multiply to avoid float division:
+    //   cand_in_flight / cand_weight < best_in_flight / best_weight
+    //   iff cand_in_flight * best_weight < best_in_flight * cand_weight
+    // Tie-break: lowest backend index wins (strict-less-than above preserves
+    // the leftmost candidate on ties).
     std::size_t best = 0;
     std::uint64_t best_in_flight = in_flight_[0].load(std::memory_order_relaxed);
     std::size_t best_weight = weights_[0];
     for (std::size_t i = 1; i < pools_.size(); ++i) {
         std::uint64_t cand_in_flight = in_flight_[i].load(std::memory_order_relaxed);
         std::size_t cand_weight = weights_[i];
-        // (cand_in_flight / cand_weight) < (best_in_flight / best_weight)
-        // iff cand_in_flight * best_weight < best_in_flight * cand_weight
-        // (all values positive; weights >= 1 by construction)
         if (cand_in_flight * static_cast<std::uint64_t>(best_weight) <
             best_in_flight * static_cast<std::uint64_t>(cand_weight)) {
             best = i;
             best_in_flight = cand_in_flight;
             best_weight = cand_weight;
         }
-        // Strict less-than above means equal effective loads keep the lowest
-        // index — exactly the tie-break the spec calls for.
     }
     return best;
 }
@@ -65,8 +56,15 @@ BackendSet::Handle BackendSet::borrow() {
         errno = ENOENT;
         return Handle{-1, 0};
     }
-    std::size_t idx = pick_lowest_load_();
-    in_flight_[idx].fetch_add(1, std::memory_order_acq_rel);
+    std::size_t idx;
+    {
+        // Pick AND bump in_flight under the mutex so two concurrent borrowers
+        // can't read the same snapshot and both target the same backend. The
+        // pool's actual borrow() (idle-queue/dial) runs unlocked.
+        std::lock_guard<std::mutex> lk(pick_mu_);
+        idx = pick_lowest_load_locked_();
+        in_flight_[idx].fetch_add(1, std::memory_order_acq_rel);
+    }
     int fd = pools_[idx]->borrow();
     if (fd < 0) {
         in_flight_[idx].fetch_sub(1, std::memory_order_acq_rel);
