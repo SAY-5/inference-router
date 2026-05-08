@@ -167,6 +167,11 @@ void run_client(const ClientCfg& cfg) {
     std::vector<std::uint8_t> payload(static_cast<std::size_t>(cfg.payload_bytes),
                                       static_cast<std::uint8_t>('a' + (cfg.id & 0x1F)));
     cfg.lat->reserve(static_cast<std::size_t>(cfg.reqs_per_client));
+    // 30s IO timeout: at 10k concurrent clients on a 32-worker router, queueing
+    // can push individual round-trips past the 5s default. The bench cares about
+    // throughput-under-saturation, not 5s tail; budget enough that the router's
+    // queue depth is the real metric, not "did we time out".
+    constexpr int kIoTimeoutMs = 30'000;
     for (int i = 0; i < cfg.reqs_per_client; ++i) {
         auto t0 = std::chrono::steady_clock::now();
         int c = ir::dial_tcp(cfg.host, cfg.port, 5000);
@@ -177,17 +182,15 @@ void run_client(const ClientCfg& cfg) {
         }
         // SO_LINGER {1, 0}: close() sends RST instead of FIN, skipping TIME_WAIT
         // on the client-side ephemeral port. Without this, 500k localhost dials
-        // exhaust the ~28k ephemeral-port pool within seconds. The router-side
-        // socket still goes through normal close, so the router's accepted-but-
-        // closed semantics aren't affected.
+        // exhaust the ~28k ephemeral-port pool within seconds.
         struct linger lg = {1, 0};
         ::setsockopt(c, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
         cfg.connects_acc->fetch_add(1, std::memory_order_relaxed);
-        bool round_ok = ir::write_message(c, payload, 5000) == ir::IoStatus::kOk;
+        bool round_ok = ir::write_message(c, payload, kIoTimeoutMs) == ir::IoStatus::kOk;
         std::vector<std::uint8_t> got;
         if (round_ok) {
-            round_ok =
-                ir::read_message(c, got, 64 * 1024, 5000) == ir::IoStatus::kOk && got == payload;
+            round_ok = ir::read_message(c, got, 64 * 1024, kIoTimeoutMs) == ir::IoStatus::kOk &&
+                       got == payload;
         }
         ir::safe_close(c);
         auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -291,9 +294,14 @@ int main(int argc, char** argv) {
         tpool = std::make_unique<ir::ThreadPool>(topts);
 
         ir::HandlerOptions hopts;
+        // Match the bench client's IO budget; queueing under 10k clients can push
+        // individual handler invocations past the 5s default.
+        hopts.client_io_timeout_ms = 30'000;
+        hopts.backend_io_timeout_ms = 30'000;
         ir::Acceptor::Options aopts;
         aopts.host = "127.0.0.1";
         aopts.port = 0;
+        aopts.backlog = 4096;
         acceptor = std::make_unique<ir::Acceptor>(aopts, &metrics, [&](int fd) {
             tpool->submit(
                 [fd, &bp = *bpool, &m = metrics, hopts] { ir::handle_one(fd, bp, m, hopts); });
