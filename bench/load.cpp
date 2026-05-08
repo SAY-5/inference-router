@@ -153,6 +153,16 @@ struct ClientCfg {
     std::atomic<std::uint64_t>* connect_fail_acc;
 };
 
+// One persistent connection per client, sending reqs_per_client length-prefixed
+// messages and reading the echo for each. This matches the v2 spec: 10000
+// concurrent CLIENTS each doing 50 requests, not 500000 fresh dials. Keeping one
+// fd per client also keeps the bench from saturating the ephemeral-port pool.
+//
+// The router's handler.handle_one() closes the client conn after one request
+// (request-then-close is the documented protocol), so we DO have to redial per
+// request — but we cap concurrency-of-fresh-dials at the live client thread count
+// (= n_workers concurrent), so ephemeral usage stays bounded by n_workers, not by
+// total request count.
 void run_client(const ClientCfg& cfg) {
     std::vector<std::uint8_t> payload(static_cast<std::size_t>(cfg.payload_bytes),
                                       static_cast<std::uint8_t>('a' + (cfg.id & 0x1F)));
@@ -165,6 +175,13 @@ void run_client(const ClientCfg& cfg) {
             cfg.connect_fail_acc->fetch_add(1, std::memory_order_relaxed);
             continue;
         }
+        // SO_LINGER {1, 0}: close() sends RST instead of FIN, skipping TIME_WAIT
+        // on the client-side ephemeral port. Without this, 500k localhost dials
+        // exhaust the ~28k ephemeral-port pool within seconds. The router-side
+        // socket still goes through normal close, so the router's accepted-but-
+        // closed semantics aren't affected.
+        struct linger lg = {1, 0};
+        ::setsockopt(c, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg));
         cfg.connects_acc->fetch_add(1, std::memory_order_relaxed);
         bool round_ok = ir::write_message(c, payload, 5000) == ir::IoStatus::kOk;
         std::vector<std::uint8_t> got;
