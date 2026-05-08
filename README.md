@@ -8,6 +8,26 @@ documented invariant and verified by a chaos test — drops zero in-flight reque
 The wire is binary: a 4-byte big-endian length prefix followed by an opaque payload.
 The router never parses payload bytes — it transports them.
 
+## Latest 10k-client bench
+
+Most recent committed run from `bench/results/bench-10k.json`
+(10000 clients × 50 requests = 500000 total requests, 64-byte payload):
+
+| metric | value |
+| --- | --- |
+| ok | _populated by CI_ |
+| err | _populated by CI_ |
+| throughput | _rps_ |
+| connect rate | _connections/sec_ |
+| p50 latency | _µs_ |
+| p95 latency | _µs_ |
+| p99 latency | _µs_ |
+| p999 latency | _µs_ |
+
+The CI job `bench-10k` produces `bench/results/bench-10k.json` on every push and
+uploads it as an artifact. The `bench-smoke` job (200×20) gates against
+`bench/results/baseline.json` with a 30% drift threshold (see `bench/regress.py`).
+
 ## Latest chaos result
 
 Most recent committed run from `bench/chaos-result.json`

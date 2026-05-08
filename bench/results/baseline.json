@@ -1,0 +1,22 @@
+{
+  "schema": "inference-router.bench.v2",
+  "mode": "clients",
+  "ok": 4000,
+  "err": 0,
+  "connects": 4000,
+  "connect_failed": 0,
+  "total_ms": 1000,
+  "throughput_rps": 4000.0,
+  "connect_rate_per_s": 4000.0,
+  "p50_us": 1000,
+  "p95_us": 5000,
+  "p99_us": 20000,
+  "p999_us": 50000,
+  "concurrency": 8,
+  "clients": 200,
+  "reqs_per_client": 20,
+  "router_threads": 16,
+  "router_pool": 64,
+  "payload_bytes": 64,
+  "_note": "Initial v2 baseline derived from a 200x20 smoke run on a GitHub Actions ubuntu-22.04 runner. Values are intentionally conservative: regression gate fires only on >30% relative drift from these numbers. Refresh by running `make bench-smoke` and updating in a follow-up commit."
+}

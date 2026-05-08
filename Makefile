@@ -1,5 +1,5 @@
 .PHONY: build build-asan build-tsan build-fuzz build-coverage test test-tsan test-coverage \
-        lint chaos bench fuzz docker clean format tidy
+        lint chaos bench bench-10k bench-smoke bench-regress fuzz docker clean format tidy
 
 BUILD_DIR ?= build
 BUILD_TYPE ?= Release
@@ -63,8 +63,21 @@ chaos-smoke: build
 bench: build
 	$(BUILD_DIR)/load_bench --concurrency 16 --duration-s 5
 
+bench-10k: build
+	mkdir -p bench/results
+	$(BUILD_DIR)/load_bench --clients 10000 --reqs-per-client 50 \
+		--router-threads 32 --router-pool 256 --client-stack-kb 96 \
+		--payload-bytes 64
+
 bench-smoke: build
-	$(BUILD_DIR)/load_bench --concurrency 8 --requests 1000
+	mkdir -p bench/results
+	$(BUILD_DIR)/load_bench --clients 200 --reqs-per-client 20 \
+		--router-threads 16 --router-pool 64 \
+		--out bench/results/smoke.json
+
+bench-regress: bench-smoke
+	python3 bench/regress.py --baseline bench/results/baseline.json \
+		--candidate bench/results/smoke.json
 
 format:
 	find src tools tests bench -name '*.cpp' -o -name '*.h' | xargs clang-format -i

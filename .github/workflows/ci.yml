@@ -91,25 +91,68 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y build-essential cmake
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake python3
       - name: Build
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build -j --target load_bench
-      - name: Run small bench
+      - name: Run smoke bench (200 clients x 20 requests)
         run: |
-          mkdir -p bench
-          ./build/load_bench --concurrency 8 --requests 1000 --payload-bytes 64 \
-            --out bench/bench-smoke.json
-          cat bench/bench-smoke.json
+          mkdir -p bench/results
+          ./build/load_bench --clients 200 --reqs-per-client 20 \
+            --router-threads 16 --router-pool 64 --payload-bytes 64 \
+            --out bench/results/smoke.json
+          cat bench/results/smoke.json
       - name: Assert JSON shape
         run: |
-          grep -q '"throughput_rps":' bench/bench-smoke.json
-          grep -q '"p99_us":' bench/bench-smoke.json
+          grep -q '"throughput_rps":' bench/results/smoke.json
+          grep -q '"p99_us":' bench/results/smoke.json
+          grep -q '"connect_rate_per_s":' bench/results/smoke.json
+      - name: Bench regression gate (30% drift)
+        run: |
+          python3 bench/regress.py --baseline bench/results/baseline.json \
+            --candidate bench/results/smoke.json --threshold 0.30
       - uses: actions/upload-artifact@v4
         with:
           name: bench-smoke
-          path: bench/bench-smoke.json
+          path: bench/results/smoke.json
+
+  bench-10k:
+    runs-on: ubuntu-22.04
+    needs: build-release
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake python3
+      - name: Raise file descriptor limit
+        run: |
+          ulimit -n 65536 || true
+          ulimit -u 65536 || true
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j --target load_bench
+      - name: Run 10k-client bench (10000 clients x 50 requests = 500k total)
+        run: |
+          mkdir -p bench/results
+          ulimit -n 65536
+          ulimit -u 65536
+          ./build/load_bench --clients 10000 --reqs-per-client 50 \
+            --router-threads 32 --router-pool 256 --client-stack-kb 96 \
+            --payload-bytes 64 --out bench/results/bench-10k.json
+          cat bench/results/bench-10k.json
+      - name: Assert correctness
+        run: |
+          ok=$(grep -oE '"ok": [0-9]+' bench/results/bench-10k.json | head -1 | awk '{print $2}')
+          err=$(grep -oE '"err": [0-9]+' bench/results/bench-10k.json | head -1 | awk '{print $2}')
+          echo "ok=$ok err=$err"
+          # Allow up to 1% errors under heavy load (kernel ephemeral-port pressure
+          # under 500k connections can produce a sliver of dial failures).
+          test "$ok" -ge 495000
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-10k
+          path: bench/results/bench-10k.json
 
   build-tsan:
     runs-on: ubuntu-22.04
