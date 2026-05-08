@@ -104,6 +104,11 @@ TEST(BackendSet, BorrowReleaseRoundsThroughEachPool) {
 
 // The headline v3 test: with three backends weighted 1:1:2, the third backend
 // should handle ~50% of requests, the first two ~25% each. ±5% tolerance.
+//
+// We hold each borrow for a fixed sleep so in_flight stays elevated long enough
+// for the WLC selection to differentiate weights — without an explicit hold
+// time, on a fast localhost echo every release lands before the next pick reads
+// the counter and selection collapses to round-robin via the tie-break.
 TEST(BackendSet, WeightedLeastConnDistribution) {
     EchoBackend b0, b1, b2;
     b0.start();
@@ -112,9 +117,9 @@ TEST(BackendSet, WeightedLeastConnDistribution) {
 
     ir::Metrics metrics;
     ir::BackendPool::Options shared;
-    shared.max_size = 8;  // each pool can grow up to 8 conns
+    shared.max_size = 16;  // allow each pool to host the full thread fan-out
     shared.enable_health_check = false;
-    shared.borrow_timeout = std::chrono::milliseconds(15'000);
+    shared.borrow_timeout = std::chrono::milliseconds(30'000);
 
     std::vector<ir::BackendSet::BackendSpec> specs = {
         {"127.0.0.1", b0.port, 1},
@@ -124,8 +129,9 @@ TEST(BackendSet, WeightedLeastConnDistribution) {
     ir::BackendSet set(specs, shared, &metrics);
 
     constexpr int kThreads = 32;
-    constexpr int kPer = 100;
+    constexpr int kPer = 200;
     constexpr int kTotal = kThreads * kPer;
+    constexpr auto kHoldDuration = std::chrono::microseconds(500);
 
     std::atomic<int> errors{0};
     std::vector<std::thread> threads;
@@ -144,6 +150,9 @@ TEST(BackendSet, WeightedLeastConnDistribution) {
                 if (ok) {
                     ok = ir::read_message(h.fd, got, 64, 5000) == ir::IoStatus::kOk && got == msg;
                 }
+                // Hold the conn while in_flight is still incremented so other
+                // threads can observe the load and route around it.
+                std::this_thread::sleep_for(kHoldDuration);
                 set.release(h, ok);
                 if (!ok) errors.fetch_add(1);
             }
@@ -167,8 +176,7 @@ TEST(BackendSet, WeightedLeastConnDistribution) {
     EXPECT_NEAR(f2, 0.50, 0.05);
     // Backends 0 and 1 share the rest equally; loosen tolerance slightly because
     // the tie-break (lowest index) systematically biases pool 0 over pool 1 when
-    // they are both at the same load score, and that bias accumulates over many
-    // borrows.
+    // they are both at the same load score.
     EXPECT_NEAR(f0, 0.25, 0.07);
     EXPECT_NEAR(f1, 0.25, 0.07);
 
