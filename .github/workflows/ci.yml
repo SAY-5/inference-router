@@ -180,10 +180,14 @@ jobs:
         run: ctest --test-dir build-cov --output-on-failure --timeout 240
       - name: Capture coverage
         run: |
+          # Ubuntu 22.04 ships lcov 1.15 which doesn't accept newer --ignore-errors
+          # flags (mismatch/inconsistent/empty). Stick to the lowest-common-denominator
+          # invocation; we exclude generated and third-party paths via --exclude.
           lcov --capture --directory build-cov --output-file build-cov/coverage.info \
-            --rc geninfo_unexecuted_blocks=1 \
-            --ignore-errors mismatch,gcov,unused,inconsistent,empty \
-            --exclude '*/_deps/*' --exclude '*/tests/*' --exclude '/usr/*'
+            --rc geninfo_unexecuted_blocks=1
+          lcov --remove build-cov/coverage.info \
+            '*/_deps/*' '*/tests/*' '/usr/*' '*/build-cov/*' \
+            --output-file build-cov/coverage.info
           lcov --summary build-cov/coverage.info 2>&1 | tee build-cov/coverage-summary.txt
       - name: Enforce coverage threshold
         # v1 establishes the coverage baseline at IR_COVERAGE_MIN; CI fails if the

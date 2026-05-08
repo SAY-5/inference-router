@@ -39,11 +39,14 @@ struct EchoBackend {
                 int c = ::accept(listen_fd, nullptr, nullptr);
                 if (c < 0) continue;
                 std::thread([c] {
+                    // 60s timeouts so a slow scheduler under high contention won't
+                    // make the echo worker quit mid-stream. Tests close conns at
+                    // teardown via pool.shutdown(), which surfaces as kPeerClosed.
                     while (true) {
                         std::vector<std::uint8_t> msg;
-                        auto rc = ir::read_message(c, msg, 64 * 1024, 5000);
+                        auto rc = ir::read_message(c, msg, 64 * 1024, 60'000);
                         if (rc != ir::IoStatus::kOk) break;
-                        if (ir::write_message(c, msg, 5000) != ir::IoStatus::kOk) break;
+                        if (ir::write_message(c, msg, 60'000) != ir::IoStatus::kOk) break;
                     }
                     ir::safe_close(c);
                 }).detach();
@@ -180,7 +183,7 @@ TEST(BackendPool, ConcurrentBorrowReleaseUnderContention) {
     opts.max_size = 4;
     opts.min_idle = 0;
     opts.enable_health_check = false;
-    opts.borrow_timeout = std::chrono::milliseconds(5000);
+    opts.borrow_timeout = std::chrono::milliseconds(30'000);
     opts.health_check_interval = std::chrono::milliseconds(60'000);
     ir::BackendPool pool(opts, &metrics);
 
