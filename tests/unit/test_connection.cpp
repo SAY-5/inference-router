@@ -119,6 +119,49 @@ TEST(Connection, LargeMessageStreamedThroughChunks) {
     ir::safe_close(b);
 }
 
+TEST(Connection, ParseFrameHappyPath) {
+    std::uint8_t buf[] = {0x00, 0x00, 0x00, 0x05, 'h', 'e', 'l', 'l', 'o'};
+    std::vector<std::uint8_t> out;
+    std::size_t consumed = 0;
+    EXPECT_EQ(ir::parse_frame(buf, sizeof(buf), 1024, out, consumed), ir::IoStatus::kOk);
+    EXPECT_EQ(consumed, 9u);
+    ASSERT_EQ(out.size(), 5u);
+    EXPECT_EQ(std::memcmp(out.data(), "hello", 5), 0);
+}
+
+TEST(Connection, ParseFrameZeroLen) {
+    std::uint8_t buf[] = {0x00, 0x00, 0x00, 0x00};
+    std::vector<std::uint8_t> out;
+    std::size_t consumed = 0;
+    EXPECT_EQ(ir::parse_frame(buf, sizeof(buf), 1024, out, consumed), ir::IoStatus::kOk);
+    EXPECT_EQ(consumed, 4u);
+    EXPECT_TRUE(out.empty());
+}
+
+TEST(Connection, ParseFrameOversizeIsProtocolError) {
+    std::uint8_t buf[] = {0x00, 0x00, 0x10, 0x00, 0x00};  // claims 4096-byte payload
+    std::vector<std::uint8_t> out;
+    std::size_t consumed = 0;
+    EXPECT_EQ(ir::parse_frame(buf, sizeof(buf), /*max=*/1024, out, consumed),
+              ir::IoStatus::kProtocolError);
+    EXPECT_EQ(consumed, 0u);
+}
+
+TEST(Connection, ParseFrameTruncatedIsPeerClosed) {
+    std::uint8_t buf[] = {0x00, 0x00, 0x00, 0x10, 'a', 'b'};  // 16-byte payload, only 2 present
+    std::vector<std::uint8_t> out;
+    std::size_t consumed = 0;
+    EXPECT_EQ(ir::parse_frame(buf, sizeof(buf), 1024, out, consumed), ir::IoStatus::kPeerClosed);
+    EXPECT_EQ(consumed, 0u);
+}
+
+TEST(Connection, ParseFrameTinyBufferIsPeerClosed) {
+    std::uint8_t buf[] = {0x00, 0x00};
+    std::vector<std::uint8_t> out;
+    std::size_t consumed = 0;
+    EXPECT_EQ(ir::parse_frame(buf, sizeof(buf), 1024, out, consumed), ir::IoStatus::kPeerClosed);
+}
+
 TEST(Connection, DialTcpLocalListener) {
     int server = ir::listen_tcp("127.0.0.1", 0, 8);
     ASSERT_GE(server, 0);

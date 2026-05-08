@@ -26,6 +26,15 @@ const char* io_status_name(IoStatus status);
 IoStatus read_message(int fd, std::vector<std::uint8_t>& out, std::size_t max_payload,
                       int timeout_ms = -1);
 
+// Pure in-memory frame decoder. Treats `buf` as a single length-prefixed frame and
+// either returns kOk (with `out` set to the payload bytes) or a status describing why
+// it could not be parsed. Used by the libFuzzer harness; mirrors `read_message`'s
+// length-prefix + max-payload semantics without touching a socket.
+//
+// On kOk, `consumed` is set to the total bytes consumed from `buf` (4 + payload).
+IoStatus parse_frame(const std::uint8_t* buf, std::size_t size, std::size_t max_payload,
+                     std::vector<std::uint8_t>& out, std::size_t& consumed);
+
 // Write one length-prefixed message to `fd`.
 IoStatus write_message(int fd, const std::uint8_t* data, std::size_t size, int timeout_ms = -1);
 

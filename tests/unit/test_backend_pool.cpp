@@ -180,12 +180,16 @@ TEST(BackendPool, ConcurrentBorrowReleaseUnderContention) {
     opts.max_size = 4;
     opts.min_idle = 0;
     opts.enable_health_check = false;
-    opts.borrow_timeout = std::chrono::milliseconds(5000);
+    opts.borrow_timeout = std::chrono::milliseconds(15000);
     opts.health_check_interval = std::chrono::milliseconds(60'000);
     ir::BackendPool pool(opts, &metrics);
 
-    constexpr int kThreads = 16;
-    constexpr int kPer = 50;
+    // High-contention configuration that doubles as the TSan stress run in CI:
+    // 50 client threads × 100 requests each ≈ 5000 borrow/release pairs racing on
+    // a 4-slot pool. Under TSan instrumentation, any data race in pool internals
+    // (mu_, idle_, in_use_, shutting_down_) surfaces here.
+    constexpr int kThreads = 50;
+    constexpr int kPer = 100;
     std::atomic<int> errors{0};
     std::vector<std::thread> threads;
     threads.reserve(kThreads);

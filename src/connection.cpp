@@ -136,6 +136,29 @@ IoStatus read_message(int fd, std::vector<std::uint8_t>& out, std::size_t max_pa
     return read_exact(fd, out.data(), len, timeout_ms, /*allow_eof_at_start=*/false);
 }
 
+IoStatus parse_frame(const std::uint8_t* buf, std::size_t size, std::size_t max_payload,
+                     std::vector<std::uint8_t>& out, std::size_t& consumed) {
+    consumed = 0;
+    if (buf == nullptr) return IoStatus::kIoError;
+    if (size < 4) {
+        // Same surface as a half-read header on a socket: not an error frame, but
+        // not parseable either. The fuzzer treats this as kPeerClosed-equivalent.
+        return IoStatus::kPeerClosed;
+    }
+    std::uint32_t net_len = 0;
+    std::memcpy(&net_len, buf, sizeof(net_len));
+    std::uint32_t len = ntohl(net_len);
+    if (len > max_payload) {
+        return IoStatus::kProtocolError;
+    }
+    if (size < static_cast<std::size_t>(4) + len) {
+        return IoStatus::kPeerClosed;
+    }
+    out.assign(buf + 4, buf + 4 + len);
+    consumed = static_cast<std::size_t>(4) + len;
+    return IoStatus::kOk;
+}
+
 IoStatus write_message(int fd, const std::uint8_t* data, std::size_t size, int timeout_ms) {
     if (size > 0xFFFFFFFFu) return IoStatus::kProtocolError;
     std::uint32_t net_len = htonl(static_cast<std::uint32_t>(size));

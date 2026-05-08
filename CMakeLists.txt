@@ -11,6 +11,9 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 option(IR_ENABLE_ASAN "Build with AddressSanitizer + UBSan" OFF)
+option(IR_ENABLE_TSAN "Build with ThreadSanitizer" OFF)
+option(IR_ENABLE_COVERAGE "Build with gcov instrumentation for lcov coverage" OFF)
+option(IR_BUILD_FUZZ "Build libFuzzer harnesses (requires clang)" OFF)
 option(IR_BUILD_TESTS "Build unit/integration/chaos tests" ON)
 option(IR_BUILD_BENCH "Build the benchmark binary" ON)
 
@@ -25,6 +28,16 @@ set(IR_WARN_FLAGS -Wall -Wextra -Wpedantic -Werror -Wshadow -Wconversion -Wsign-
 if(IR_ENABLE_ASAN)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
     add_link_options(-fsanitize=address,undefined)
+endif()
+
+if(IR_ENABLE_TSAN)
+    add_compile_options(-fsanitize=thread -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=thread)
+endif()
+
+if(IR_ENABLE_COVERAGE)
+    add_compile_options(--coverage -O0 -g)
+    add_link_options(--coverage)
 endif()
 
 add_library(ir_core STATIC
@@ -81,7 +94,9 @@ if(IR_BUILD_TESTS)
     target_compile_options(integration_tests PRIVATE ${IR_TEST_WARN_FLAGS})
     target_link_libraries(integration_tests PRIVATE ir_core GTest::gtest_main)
     add_test(NAME integration_tests COMMAND integration_tests)
-    set_tests_properties(integration_tests PROPERTIES TIMEOUT 60)
+    # 60s is enough for Release; sanitizer builds (especially TSan) need more headroom.
+    set_tests_properties(integration_tests PROPERTIES TIMEOUT 180)
+    set_tests_properties(unit_tests PROPERTIES TIMEOUT 180)
 
     add_executable(chaos tests/chaos/chaos.cpp)
     target_compile_options(chaos PRIVATE ${IR_WARN_FLAGS})
@@ -92,4 +107,12 @@ if(IR_BUILD_BENCH)
     add_executable(load_bench bench/load.cpp)
     target_compile_options(load_bench PRIVATE ${IR_WARN_FLAGS})
     target_link_libraries(load_bench PRIVATE ir_core)
+endif()
+
+if(IR_BUILD_FUZZ)
+    # libFuzzer wants its own main and -fsanitize=fuzzer. Caller (CI) is responsible
+    # for building with clang and adding -fsanitize=fuzzer,address,undefined globally.
+    add_executable(fuzz_wire tests/fuzz/fuzz_wire.cpp)
+    target_compile_options(fuzz_wire PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    target_link_libraries(fuzz_wire PRIVATE ir_core)
 endif()

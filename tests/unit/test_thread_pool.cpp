@@ -78,6 +78,32 @@ TEST(ThreadPool, BlocksOnFullByDefault) {
     pool.stop();
 }
 
+TEST(ThreadPool, HighContention50x100Submit) {
+    // TSan stress: 50 producer threads each push 100 tasks into a small bounded queue
+    // serviced by 8 workers. Any data race in queue_/not_empty_/not_full_/stop_ shows
+    // up here when the test binary is built with -fsanitize=thread.
+    ir::ThreadPool::Options opts;
+    opts.worker_count = 8;
+    opts.max_queue_depth = 64;  // forces blocking back-pressure
+    ir::ThreadPool pool(opts);
+
+    constexpr int kProducers = 50;
+    constexpr int kPer = 100;
+    std::atomic<int> ran{0};
+    std::vector<std::thread> producers;
+    producers.reserve(kProducers);
+    for (int p = 0; p < kProducers; ++p) {
+        producers.emplace_back([&] {
+            for (int i = 0; i < kPer; ++i) {
+                ASSERT_TRUE(pool.submit([&] { ran.fetch_add(1, std::memory_order_relaxed); }));
+            }
+        });
+    }
+    for (auto& t : producers) t.join();
+    pool.stop();
+    EXPECT_EQ(ran.load(), kProducers * kPer);
+}
+
 TEST(ThreadPool, StopDrainsQueuedTasks) {
     ir::ThreadPool::Options opts;
     opts.worker_count = 2;
