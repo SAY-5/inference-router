@@ -110,9 +110,12 @@ if(IR_BUILD_BENCH)
 endif()
 
 if(IR_BUILD_FUZZ)
-    # libFuzzer wants its own main and -fsanitize=fuzzer. Caller (CI) is responsible
-    # for building with clang and adding -fsanitize=fuzzer,address,undefined globally.
+    # libFuzzer's main lives in the fuzzer runtime; only the fuzz target should pull
+    # it in. The rest of the build (ir_core, etc.) is built with
+    # -fsanitize=fuzzer-no-link so coverage instrumentation is on without dragging
+    # in libFuzzer's main, which would conflict with the project's own entry points.
     add_executable(fuzz_wire tests/fuzz/fuzz_wire.cpp)
-    target_compile_options(fuzz_wire PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    target_compile_options(fuzz_wire PRIVATE -Wall -Wextra -Wpedantic -Werror -fsanitize=fuzzer)
+    target_link_options(fuzz_wire PRIVATE -fsanitize=fuzzer)
     target_link_libraries(fuzz_wire PRIVATE ir_core)
 endif()

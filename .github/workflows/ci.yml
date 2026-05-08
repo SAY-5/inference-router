@@ -140,7 +140,7 @@ jobs:
           CXX: clang++
           CFLAGS: "-fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer -g -O1"
           CXXFLAGS: "-fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer -g -O1"
-          LDFLAGS: "-fsanitize=fuzzer,address,undefined"
+          LDFLAGS: "-fsanitize=fuzzer-no-link,address,undefined"
         run: >-
           cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=Debug -DIR_BUILD_FUZZ=ON
           -DIR_BUILD_TESTS=OFF -DIR_BUILD_BENCH=OFF

@@ -180,16 +180,12 @@ TEST(BackendPool, ConcurrentBorrowReleaseUnderContention) {
     opts.max_size = 4;
     opts.min_idle = 0;
     opts.enable_health_check = false;
-    opts.borrow_timeout = std::chrono::milliseconds(15000);
+    opts.borrow_timeout = std::chrono::milliseconds(5000);
     opts.health_check_interval = std::chrono::milliseconds(60'000);
     ir::BackendPool pool(opts, &metrics);
 
-    // High-contention configuration that doubles as the TSan stress run in CI:
-    // 50 client threads × 100 requests each ≈ 5000 borrow/release pairs racing on
-    // a 4-slot pool. Under TSan instrumentation, any data race in pool internals
-    // (mu_, idle_, in_use_, shutting_down_) surfaces here.
-    constexpr int kThreads = 50;
-    constexpr int kPer = 100;
+    constexpr int kThreads = 16;
+    constexpr int kPer = 50;
     std::atomic<int> errors{0};
     std::vector<std::thread> threads;
     threads.reserve(kThreads);
@@ -213,6 +209,63 @@ TEST(BackendPool, ConcurrentBorrowReleaseUnderContention) {
     }
     for (auto& t : threads) t.join();
     EXPECT_EQ(errors.load(), 0);
+
+    pool.shutdown();
+    backend.shutdown();
+}
+
+// High-contention TSan stress: 50 client threads × 100 ops each, racing on the
+// connection-pool primitives. Pool is sized generously (16 slots) so the test
+// exercises mu_/cv_/idle_/in_use_ under load without backend-throughput becoming
+// the bottleneck. Under TSan, any data race in the pool surfaces here.
+TEST(BackendPool, HighContention50x100UnderTSanStress) {
+    EchoBackend backend;
+    backend.start();
+
+    ir::Metrics metrics;
+    ir::BackendPool::Options opts;
+    opts.host = "127.0.0.1";
+    opts.port = backend.port;
+    opts.max_size = 16;
+    opts.min_idle = 0;
+    opts.enable_health_check = false;
+    opts.borrow_timeout = std::chrono::milliseconds(30'000);
+    opts.health_check_interval = std::chrono::milliseconds(60'000);
+    ir::BackendPool pool(opts, &metrics);
+
+    constexpr int kThreads = 50;
+    constexpr int kPer = 100;
+    std::atomic<int> errors{0};
+    std::atomic<int> ok{0};
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+    for (int i = 0; i < kThreads; ++i) {
+        threads.emplace_back([&, i] {
+            for (int j = 0; j < kPer; ++j) {
+                int fd = pool.borrow();
+                if (fd < 0) {
+                    errors.fetch_add(1);
+                    continue;
+                }
+                std::vector<std::uint8_t> msg = {'p', 'i', static_cast<std::uint8_t>(i & 0xFF),
+                                                 static_cast<std::uint8_t>(j & 0xFF)};
+                auto wr = ir::write_message(fd, msg, 5000);
+                std::vector<std::uint8_t> got;
+                auto rd = ir::read_message(fd, got, 64, 5000);
+                bool round_trip_ok =
+                    (wr == ir::IoStatus::kOk) && (rd == ir::IoStatus::kOk) && got == msg;
+                pool.release(fd, round_trip_ok);
+                if (round_trip_ok) {
+                    ok.fetch_add(1);
+                } else {
+                    errors.fetch_add(1);
+                }
+            }
+        });
+    }
+    for (auto& t : threads) t.join();
+    EXPECT_EQ(errors.load(), 0);
+    EXPECT_EQ(ok.load(), kThreads * kPer);
 
     pool.shutdown();
     backend.shutdown();
