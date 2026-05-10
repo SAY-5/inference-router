@@ -36,7 +36,9 @@ void handle_one(int client_fd, BackendPool& backend, Metrics& metrics, const Han
         std::vector<std::uint8_t> req;
         auto r = read_message(client_fd, req, opts.max_payload, opts.client_io_timeout_ms);
         if (r != IoStatus::kOk) {
-            IR_LOG_DEBUG("client read failed: %s", io_status_name(r));
+            // Temporarily elevated to WARN to diagnose the post-v4 bench failure on CI.
+            IR_LOG_WARN("client read failed: %s errno=%d fd=%d timeout=%d",
+                        io_status_name(r), errno, client_fd, opts.client_io_timeout_ms);
             metrics.inc_errored();
             safe_close(client_fd);
             metrics.dec_in_flight();
