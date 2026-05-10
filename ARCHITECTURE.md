@@ -116,8 +116,6 @@ plays poorly with leak detection; GoogleTest itself isn't compiled with ASan in 
 ## What's deliberately not here
 
 - **No HTTP layer.** Documented in the README's "What this is *not*" section.
-- **No TLS.** Plaintext only. Adding TLS means swapping the `connection.cpp` read/write
-  helpers for an OpenSSL/BoringSSL-backed pair.
 - **No service discovery.** Backend list is `--backend host:port` at startup, single
   destination per pool. Real deployments would feed in a discovery client (Consul,
   k8s endpoints API, etc.) and rotate destinations per borrow.
@@ -130,6 +128,46 @@ plays poorly with leak detection; GoogleTest itself isn't compiled with ASan in 
   Prometheus is a code change at one site (`src/metrics.cpp`).
 - **No structured config file.** All config is CLI flags. This keeps the binary's startup
   surface small and the documentation easy to keep in sync.
+
+## TLS termination (v4)
+
+TLS terminates on the acceptor. The backend pool stays plaintext.
+
+```
+   client ── TLS ──▶ router (SSL_accept) ── plaintext ──▶ backend
+```
+
+Why this split:
+
+- **The TLS boundary is the trust boundary.** The router is the edge of the
+  routable network; backend pools are local (loopback in dev, a service mesh in
+  prod). Mesh-provided mTLS between the router and backends is the production
+  pattern — adding a second TLS layer inside the router would duplicate it.
+- **Handshakes don't run on the acceptor thread.** `SSL_accept()` is CPU-heavy
+  (RSA / ECDHE math). Doing it on the accept loop would starve `accept()` under
+  load. `handle_one()` runs the handshake on the worker thread that picked up
+  the fd; the acceptor is back in `epoll_wait` immediately.
+- **The fd is non-blocking during the handshake.** `pump_ssl()` (in
+  `src/tls.cpp`) drives `SSL_accept` through its `WANT_READ` / `WANT_WRITE`
+  cycle via `poll()` with a `tls_handshake_timeout_ms` deadline (default 5s).
+  A misbehaving peer cannot park a worker thread indefinitely.
+- **mTLS is one flag.** `--tls-client-ca PATH` flips the verify mode to
+  `SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT` and loads the bundle.
+
+The wire I/O surface is a small `Stream` value (a `(fd, SSL*)` pair). When
+`ssl == nullptr` the read/write helpers fall through to the plain-fd path —
+the same code path that the rest of `connection.cpp` has always used. This
+keeps the non-TLS hot path zero-overhead: no virtual dispatch, no extra branch
+in `recv()`.
+
+Cert lifecycle is the operator's problem. The router reads cert/key at startup
+and does not reload them; a deploy = a process restart. The `max_lifetime` knob
+on the backend pool (`5min` default) is independent of the acceptor's TLS cert
+lifetime — see the connection pool math section above.
+
+`tests/chaos/chaos.cpp --tls` exercises the same no-drop invariant over TLS:
+every client connection performs a real SSL_connect, sends a length-prefixed
+message, reads the echo. The CI job `chaos-tls` asserts `dropped == 0` end-to-end.
 
 ## Why this is split off from `job-controller`
 

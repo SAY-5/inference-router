@@ -11,3 +11,4 @@ bench/results/*
 !bench/results/baseline.json
 !bench/results/bench-10k.json
 !bench/chaos-result.json
+tests/certs/

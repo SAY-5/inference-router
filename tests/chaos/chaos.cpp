@@ -18,6 +18,8 @@
 //   bench/chaos-result.json  with the verdict + counters + timing
 
 #include <netinet/in.h>
+#include <openssl/err.h>
+#include <openssl/ssl.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -41,6 +43,7 @@
 #include "log.h"
 #include "metrics.h"
 #include "thread_pool.h"
+#include "tls.h"
 
 namespace {
 
@@ -100,6 +103,7 @@ struct ClientStats {
     std::atomic<std::uint64_t> io_failed{0};
 };
 
+// Plain-fd client: one request, one response, then close.
 void client_main(int id, std::uint16_t router_port, int requests, ClientStats& stats) {
     for (int i = 0; i < requests; ++i) {
         int c = ir::dial_tcp("127.0.0.1", router_port, 2000);
@@ -133,6 +137,50 @@ void client_main(int id, std::uint16_t router_port, int requests, ClientStats& s
     }
 }
 
+// TLS client: same loop but each connection runs a real SSL_connect() over the
+// router's TLS-terminating acceptor. Shares one SSL_CTX (thread-safe in 1.1+).
+void tls_client_main(int id, std::uint16_t router_port, int requests, SSL_CTX* ctx,
+                     ClientStats& stats) {
+    for (int i = 0; i < requests; ++i) {
+        int c = ir::dial_tcp("127.0.0.1", router_port, 2000);
+        if (c < 0) {
+            stats.connect_failed.fetch_add(1);
+            continue;
+        }
+        SSL* ssl = SSL_new(ctx);
+        if (!ssl) {
+            ir::safe_close(c);
+            stats.io_failed.fetch_add(1);
+            continue;
+        }
+        SSL_set_fd(ssl, c);
+        if (SSL_connect(ssl) <= 0) {
+            SSL_free(ssl);
+            ir::safe_close(c);
+            stats.connect_failed.fetch_add(1);
+            continue;
+        }
+        stats.sent.fetch_add(1);
+        std::uint8_t payload[16];
+        std::memset(payload, id & 0xFF, sizeof(payload));
+        ir::Stream s = ir::Stream::tls(ssl);
+        auto wr = ir::write_message(s, payload, sizeof(payload), 5000);
+        if (wr != ir::IoStatus::kOk) {
+            stats.io_failed.fetch_add(1);
+            ir::close_stream(s);
+            continue;
+        }
+        std::vector<std::uint8_t> got;
+        auto rd = ir::read_message(s, got, 1024, 5000);
+        if (rd == ir::IoStatus::kOk) {
+            stats.got_response.fetch_add(1);
+        } else {
+            stats.io_failed.fetch_add(1);
+        }
+        ir::close_stream(s);
+    }
+}
+
 struct Args {
     int clients = 50;
     int requests = 100;
@@ -141,12 +189,16 @@ struct Args {
     int pool_size = 8;
     int shutdown_grace_ms = 30000;
     std::string out_path = "bench/chaos-result.json";
+    bool tls = false;
+    std::string tls_cert_path;
+    std::string tls_key_path;
 };
 
 void usage() {
     std::fprintf(stderr,
                  "chaos --clients N --requests N --sigterm-after-ms MS\n"
-                 "  --threads N --pool-size N --shutdown-grace MS --out PATH\n");
+                 "  --threads N --pool-size N --shutdown-grace MS --out PATH\n"
+                 "  --tls --tls-cert PATH --tls-key PATH\n");
 }
 
 bool parse_args(int argc, char** argv, Args& out) {
@@ -158,6 +210,9 @@ bool parse_args(int argc, char** argv, Args& out) {
         {"pool-size", required_argument, nullptr, 'p'},
         {"shutdown-grace", required_argument, nullptr, 'g'},
         {"out", required_argument, nullptr, 'o'},
+        {"tls", no_argument, nullptr, 'T'},
+        {"tls-cert", required_argument, nullptr, 'C'},
+        {"tls-key", required_argument, nullptr, 'K'},
         {"help", no_argument, nullptr, 'h'},
         {nullptr, 0, nullptr, 0},
     };
@@ -184,6 +239,15 @@ bool parse_args(int argc, char** argv, Args& out) {
                 break;
             case 'o':
                 out.out_path = optarg;
+                break;
+            case 'T':
+                out.tls = true;
+                break;
+            case 'C':
+                out.tls_cert_path = optarg;
+                break;
+            case 'K':
+                out.tls_key_path = optarg;
                 break;
             case 'h':
                 usage();
@@ -238,6 +302,33 @@ int main(int argc, char** argv) {
     hopts.client_io_timeout_ms = 10'000;
     hopts.backend_io_timeout_ms = 10'000;
 
+    // TLS terminates on the acceptor; backend pool stays plaintext (mesh layer's
+    // job for prod). Real handshake on every client connection.
+    ir::TlsContext tls_ctx;
+    SSL_CTX* client_ssl_ctx = nullptr;
+    if (args.tls) {
+        if (args.tls_cert_path.empty() || args.tls_key_path.empty()) {
+            std::fprintf(stderr, "fatal: --tls requires --tls-cert and --tls-key\n");
+            return 2;
+        }
+        ir::TlsContext::Options topts2;
+        topts2.cert_path = args.tls_cert_path;
+        topts2.key_path = args.tls_key_path;
+        if (!tls_ctx.init_server(topts2)) {
+            std::fprintf(stderr, "fatal: tls server init failed\n");
+            return 1;
+        }
+        hopts.server_tls = &tls_ctx;
+
+        ir::tls_global_init();
+        client_ssl_ctx = SSL_CTX_new(TLS_client_method());
+        if (!client_ssl_ctx) {
+            std::fprintf(stderr, "fatal: tls client ctx failed\n");
+            return 1;
+        }
+        SSL_CTX_set_verify(client_ssl_ctx, SSL_VERIFY_NONE, nullptr);
+    }
+
     ir::Acceptor::Options aopts;
     aopts.host = "127.0.0.1";
     aopts.port = 0;
@@ -264,7 +355,12 @@ int main(int argc, char** argv) {
     std::vector<std::thread> clients;
     clients.reserve(static_cast<std::size_t>(args.clients));
     for (int i = 0; i < args.clients; ++i) {
-        clients.emplace_back(client_main, i, router_port, args.requests, std::ref(stats));
+        if (args.tls) {
+            clients.emplace_back(tls_client_main, i, router_port, args.requests, client_ssl_ctx,
+                                 std::ref(stats));
+        } else {
+            clients.emplace_back(client_main, i, router_port, args.requests, std::ref(stats));
+        }
     }
 
     // Sleep until the configured drain trigger.
@@ -296,6 +392,7 @@ int main(int argc, char** argv) {
 
     for (auto& t : clients) t.join();
     backend.shutdown();
+    if (client_ssl_ctx) SSL_CTX_free(client_ssl_ctx);
 
     auto run_end = std::chrono::steady_clock::now();
     auto run_end_wall = std::chrono::system_clock::now();

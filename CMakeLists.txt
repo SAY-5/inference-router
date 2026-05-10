@@ -40,6 +40,8 @@ if(IR_ENABLE_COVERAGE)
     add_link_options(--coverage)
 endif()
 
+find_package(OpenSSL 3.0 REQUIRED)
+
 add_library(ir_core STATIC
     src/connection.cpp
     src/thread_pool.cpp
@@ -50,10 +52,11 @@ add_library(ir_core STATIC
     src/shutdown.cpp
     src/metrics.cpp
     src/log.cpp
+    src/tls.cpp
 )
 target_compile_options(ir_core PRIVATE ${IR_WARN_FLAGS})
 target_include_directories(ir_core PUBLIC src)
-target_link_libraries(ir_core PUBLIC pthread)
+target_link_libraries(ir_core PUBLIC pthread OpenSSL::SSL OpenSSL::Crypto)
 
 add_executable(inference-router src/main.cpp)
 target_compile_options(inference-router PRIVATE ${IR_WARN_FLAGS})
@@ -85,6 +88,7 @@ if(IR_BUILD_TESTS)
         tests/unit/test_metrics.cpp
         tests/unit/test_backend_pool.cpp
         tests/unit/test_backend_set.cpp
+        tests/unit/test_tls.cpp
     )
     target_compile_options(unit_tests PRIVATE ${IR_TEST_WARN_FLAGS})
     target_link_libraries(unit_tests PRIVATE ir_core GTest::gtest_main)

@@ -18,6 +18,7 @@
 #include "metrics.h"
 #include "shutdown.h"
 #include "thread_pool.h"
+#include "tls.h"
 
 namespace {
 
@@ -32,6 +33,13 @@ struct Args {
     std::size_t pool_size = 16;
     int shutdown_grace_ms = 30'000;
     int log_level = 1;  // info
+
+    // v4 TLS: terminate TLS on the acceptor side. Backend pool stays plaintext;
+    // see ARCHITECTURE.md for why (production mTLS-via-mesh pattern).
+    bool tls_enabled = false;
+    std::string tls_cert_path;
+    std::string tls_key_path;
+    std::string tls_client_ca_path;  // empty: no mTLS; set: require client cert
 };
 
 void usage() {
@@ -47,6 +55,11 @@ void usage() {
                  "  --pool-size N                  (per-backend pool max; default 16)\n"
                  "  --shutdown-grace SECONDS       (default 30)\n"
                  "  --log-level [0..3]             (default 1=info)\n"
+                 "  --tls                          enable TLS on the acceptor (requires "
+                 "--tls-cert and --tls-key)\n"
+                 "  --tls-cert PATH                PEM cert chain\n"
+                 "  --tls-key PATH                 PEM private key\n"
+                 "  --tls-client-ca PATH           PEM CA bundle; when set, mTLS is required\n"
                  "  --help\n");
 }
 
@@ -97,6 +110,10 @@ bool parse_args(int argc, char** argv, Args& out) {
         {"pool-size", required_argument, nullptr, 'p'},
         {"shutdown-grace", required_argument, nullptr, 'g'},
         {"log-level", required_argument, nullptr, 'L'},
+        {"tls", no_argument, nullptr, 'T'},
+        {"tls-cert", required_argument, nullptr, 'C'},
+        {"tls-key", required_argument, nullptr, 'K'},
+        {"tls-client-ca", required_argument, nullptr, 'A'},
         {"help", no_argument, nullptr, 'h'},
         {nullptr, 0, nullptr, 0},
     };
@@ -132,6 +149,18 @@ bool parse_args(int argc, char** argv, Args& out) {
                 break;
             case 'L':
                 out.log_level = std::atoi(optarg);
+                break;
+            case 'T':
+                out.tls_enabled = true;
+                break;
+            case 'C':
+                out.tls_cert_path = optarg;
+                break;
+            case 'K':
+                out.tls_key_path = optarg;
+                break;
+            case 'A':
+                out.tls_client_ca_path = optarg;
                 break;
             case 'h':
                 usage();
@@ -173,6 +202,26 @@ int main(int argc, char** argv) {
 
     ir::HandlerOptions hopts;
 
+    // TLS: build the server context once, share it across worker threads. The
+    // handshake itself runs on the worker thread in handle_one(), not here.
+    ir::TlsContext tls_ctx;
+    if (args.tls_enabled) {
+        if (args.tls_cert_path.empty() || args.tls_key_path.empty()) {
+            std::fprintf(stderr, "fatal: --tls requires --tls-cert and --tls-key\n");
+            return 2;
+        }
+        ir::TlsContext::Options topts2;
+        topts2.cert_path = args.tls_cert_path;
+        topts2.key_path = args.tls_key_path;
+        topts2.client_ca_path = args.tls_client_ca_path;
+        topts2.require_client_cert = !args.tls_client_ca_path.empty();
+        if (!tls_ctx.init_server(topts2)) {
+            std::fprintf(stderr, "fatal: TLS context init failed\n");
+            return 1;
+        }
+        hopts.server_tls = &tls_ctx;
+    }
+
     ir::Acceptor::Options aopts;
     aopts.host = args.listen_host;
     aopts.port = args.listen_port;
@@ -194,9 +243,11 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "fatal: acceptor failed to start\n");
         return 1;
     }
-    IR_LOG_INFO("inference-router listening on %s:%u backends=%zu threads=%zu pool/backend=%zu",
-                args.listen_host.c_str(), acceptor.bound_port(), args.backends.size(), args.threads,
-                args.pool_size);
+    IR_LOG_INFO(
+        "inference-router listening on %s:%u tls=%s backends=%zu threads=%zu pool/backend=%zu",
+        args.listen_host.c_str(), acceptor.bound_port(),
+        args.tls_enabled ? (args.tls_client_ca_path.empty() ? "on" : "mtls") : "off",
+        args.backends.size(), args.threads, args.pool_size);
     for (std::size_t i = 0; i < args.backends.size(); ++i) {
         const auto& b = args.backends[i];
         IR_LOG_INFO("  backend[%zu] = %s:%u weight=%zu", i, b.host.c_str(), b.port, b.weight);

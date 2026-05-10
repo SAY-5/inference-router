@@ -33,7 +33,7 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake clang
+          sudo apt-get install -y build-essential cmake clang libssl-dev
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
       - name: Build
@@ -46,7 +46,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y build-essential cmake
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake libssl-dev
       - name: Configure ASan
         run: cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DIR_ENABLE_ASAN=ON
       - name: Build
@@ -63,7 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y build-essential cmake
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake libssl-dev
       - name: Build
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -85,13 +85,48 @@ jobs:
           name: chaos-smoke
           path: bench/chaos-smoke.json
 
+  chaos-tls:
+    runs-on: ubuntu-22.04
+    needs: build-release
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake libssl-dev openssl
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j --target chaos
+      - name: Generate test cert
+        run: |
+          mkdir -p tests/certs
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout tests/certs/key.pem -out tests/certs/cert.pem \
+            -subj "/C=US/O=inference-router/CN=localhost"
+      - name: Run chaos over TLS (10 clients x 50 requests, drain at t=1.5s)
+        run: |
+          mkdir -p bench
+          ./build/chaos --clients 10 --requests 50 --sigterm-after-ms 1500 \
+            --threads 4 --pool-size 4 --shutdown-grace 30000 \
+            --tls --tls-cert tests/certs/cert.pem --tls-key tests/certs/key.pem \
+            --out bench/chaos-tls.json
+          cat bench/chaos-tls.json
+      - name: Assert dropped == 0
+        run: |
+          dropped=$(grep -o '"dropped_total": [0-9]*' bench/chaos-tls.json | awk '{print $2}')
+          echo "dropped=$dropped"
+          test "$dropped" = "0"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chaos-tls
+          path: bench/chaos-tls.json
+
   bench-smoke:
     runs-on: ubuntu-22.04
     needs: build-release
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y build-essential cmake python3
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake python3 libssl-dev
       - name: Build
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -123,7 +158,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y build-essential cmake python3
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake python3 libssl-dev
       - name: Raise file descriptor limit
         run: |
           ulimit -n 65536 || true
@@ -171,7 +206,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y build-essential cmake clang
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake clang libssl-dev
       - name: Configure TSan
         run: >-
           cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DIR_ENABLE_TSAN=ON
@@ -188,7 +223,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y build-essential cmake clang
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake clang libssl-dev
       - name: Configure fuzz
         env:
           CC: clang
@@ -224,7 +259,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y build-essential cmake lcov
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake lcov libssl-dev
       - name: Configure coverage
         run: >-
           cmake -S . -B build-cov -DCMAKE_BUILD_TYPE=Debug -DIR_ENABLE_COVERAGE=ON
