@@ -36,8 +36,7 @@ void handle_one(int client_fd, BackendPool& backend, Metrics& metrics, const Han
         std::vector<std::uint8_t> req;
         auto r = read_message(client_fd, req, opts.max_payload, opts.client_io_timeout_ms);
         if (r != IoStatus::kOk) {
-            // Temporarily elevated to WARN to diagnose the post-v4 bench failure on CI.
-            IR_LOG_WARN("client read failed: %s errno=%d", io_status_name(r), errno);
+            IR_LOG_DEBUG("client read failed: %s", io_status_name(r));
             metrics.inc_errored();
             safe_close(client_fd);
             metrics.dec_in_flight();
@@ -57,7 +56,7 @@ void handle_one(int client_fd, BackendPool& backend, Metrics& metrics, const Han
         bool conn_ok = true;
         auto wr = write_message(backend_fd, req.data(), req.size(), opts.backend_io_timeout_ms);
         if (wr != IoStatus::kOk) {
-            IR_LOG_WARN("backend write failed: %s", io_status_name(wr));
+            IR_LOG_DEBUG("backend write failed: %s", io_status_name(wr));
             conn_ok = false;
             reply_error_plain(client_fd, "ERR backend write", opts.client_io_timeout_ms);
             backend.release(backend_fd, false);
@@ -70,7 +69,7 @@ void handle_one(int client_fd, BackendPool& backend, Metrics& metrics, const Han
         std::vector<std::uint8_t> resp;
         auto rr = read_message(backend_fd, resp, opts.max_payload, opts.backend_io_timeout_ms);
         if (rr != IoStatus::kOk) {
-            IR_LOG_WARN("backend read failed: %s", io_status_name(rr));
+            IR_LOG_DEBUG("backend read failed: %s", io_status_name(rr));
             conn_ok = false;
             reply_error_plain(client_fd, "ERR backend read", opts.client_io_timeout_ms);
             backend.release(backend_fd, false);
@@ -83,7 +82,7 @@ void handle_one(int client_fd, BackendPool& backend, Metrics& metrics, const Han
         auto cw = write_message(client_fd, resp.data(), resp.size(), opts.client_io_timeout_ms);
         backend.release(backend_fd, conn_ok);
         if (cw != IoStatus::kOk) {
-            IR_LOG_WARN("client write failed: %s", io_status_name(cw));
+            IR_LOG_DEBUG("client write failed: %s", io_status_name(cw));
             metrics.inc_errored();
             safe_close(client_fd);
             metrics.dec_in_flight();
@@ -101,7 +100,7 @@ void handle_one(int client_fd, BackendPool& backend, Metrics& metrics, const Han
     //      the fd inside accept_handshake and we just record errored.
     SSL* ssl = opts.server_tls->accept_handshake(client_fd, opts.tls_handshake_timeout_ms);
     if (!ssl) {
-        IR_LOG_WARN("tls handshake failed");
+        IR_LOG_DEBUG("tls handshake failed");
         metrics.inc_errored();
         metrics.dec_in_flight();
         return;
@@ -111,7 +110,7 @@ void handle_one(int client_fd, BackendPool& backend, Metrics& metrics, const Han
     std::vector<std::uint8_t> req;
     auto r = read_message(client, req, opts.max_payload, opts.client_io_timeout_ms);
     if (r != IoStatus::kOk) {
-        IR_LOG_WARN("client read failed: %s", io_status_name(r));
+        IR_LOG_DEBUG("client read failed: %s", io_status_name(r));
         metrics.inc_errored();
         close_stream(client);
         metrics.dec_in_flight();
@@ -131,7 +130,7 @@ void handle_one(int client_fd, BackendPool& backend, Metrics& metrics, const Han
     bool conn_ok = true;
     auto wr = write_message(backend_fd, req.data(), req.size(), opts.backend_io_timeout_ms);
     if (wr != IoStatus::kOk) {
-        IR_LOG_WARN("backend write failed: %s", io_status_name(wr));
+        IR_LOG_DEBUG("backend write failed: %s", io_status_name(wr));
         conn_ok = false;
         reply_error_tls(ssl, "ERR backend write", opts.client_io_timeout_ms);
         backend.release(backend_fd, false);
@@ -144,7 +143,7 @@ void handle_one(int client_fd, BackendPool& backend, Metrics& metrics, const Han
     std::vector<std::uint8_t> resp;
     auto rr = read_message(backend_fd, resp, opts.max_payload, opts.backend_io_timeout_ms);
     if (rr != IoStatus::kOk) {
-        IR_LOG_WARN("backend read failed: %s", io_status_name(rr));
+        IR_LOG_DEBUG("backend read failed: %s", io_status_name(rr));
         conn_ok = false;
         reply_error_tls(ssl, "ERR backend read", opts.client_io_timeout_ms);
         backend.release(backend_fd, false);
@@ -157,7 +156,7 @@ void handle_one(int client_fd, BackendPool& backend, Metrics& metrics, const Han
     auto cw = write_message(client, resp.data(), resp.size(), opts.client_io_timeout_ms);
     backend.release(backend_fd, conn_ok);
     if (cw != IoStatus::kOk) {
-        IR_LOG_WARN("client write failed: %s", io_status_name(cw));
+        IR_LOG_DEBUG("client write failed: %s", io_status_name(cw));
         metrics.inc_errored();
         close_stream(client);
         metrics.dec_in_flight();
@@ -180,7 +179,7 @@ void handle_one(int client_fd, BackendSet& backend_set, Metrics& metrics,
         std::vector<std::uint8_t> req;
         auto r = read_message(client_fd, req, opts.max_payload, opts.client_io_timeout_ms);
         if (r != IoStatus::kOk) {
-            IR_LOG_WARN("client read failed: %s", io_status_name(r));
+            IR_LOG_DEBUG("client read failed: %s", io_status_name(r));
             metrics.inc_errored();
             safe_close(client_fd);
             metrics.dec_in_flight();
@@ -200,7 +199,7 @@ void handle_one(int client_fd, BackendSet& backend_set, Metrics& metrics,
         bool conn_ok = true;
         auto wr = write_message(handle.fd, req.data(), req.size(), opts.backend_io_timeout_ms);
         if (wr != IoStatus::kOk) {
-            IR_LOG_WARN("backend write failed: %s", io_status_name(wr));
+            IR_LOG_DEBUG("backend write failed: %s", io_status_name(wr));
             conn_ok = false;
             reply_error_plain(client_fd, "ERR backend write", opts.client_io_timeout_ms);
             backend_set.release(handle, false);
@@ -213,7 +212,7 @@ void handle_one(int client_fd, BackendSet& backend_set, Metrics& metrics,
         std::vector<std::uint8_t> resp;
         auto rr = read_message(handle.fd, resp, opts.max_payload, opts.backend_io_timeout_ms);
         if (rr != IoStatus::kOk) {
-            IR_LOG_WARN("backend read failed: %s", io_status_name(rr));
+            IR_LOG_DEBUG("backend read failed: %s", io_status_name(rr));
             conn_ok = false;
             reply_error_plain(client_fd, "ERR backend read", opts.client_io_timeout_ms);
             backend_set.release(handle, false);
@@ -226,7 +225,7 @@ void handle_one(int client_fd, BackendSet& backend_set, Metrics& metrics,
         auto cw = write_message(client_fd, resp.data(), resp.size(), opts.client_io_timeout_ms);
         backend_set.release(handle, conn_ok);
         if (cw != IoStatus::kOk) {
-            IR_LOG_WARN("client write failed: %s", io_status_name(cw));
+            IR_LOG_DEBUG("client write failed: %s", io_status_name(cw));
             metrics.inc_errored();
             safe_close(client_fd);
             metrics.dec_in_flight();
@@ -242,7 +241,7 @@ void handle_one(int client_fd, BackendSet& backend_set, Metrics& metrics,
     // TLS path.
     SSL* ssl = opts.server_tls->accept_handshake(client_fd, opts.tls_handshake_timeout_ms);
     if (!ssl) {
-        IR_LOG_WARN("tls handshake failed");
+        IR_LOG_DEBUG("tls handshake failed");
         metrics.inc_errored();
         metrics.dec_in_flight();
         return;
@@ -252,7 +251,7 @@ void handle_one(int client_fd, BackendSet& backend_set, Metrics& metrics,
     std::vector<std::uint8_t> req;
     auto r = read_message(client, req, opts.max_payload, opts.client_io_timeout_ms);
     if (r != IoStatus::kOk) {
-        IR_LOG_WARN("client read failed: %s", io_status_name(r));
+        IR_LOG_DEBUG("client read failed: %s", io_status_name(r));
         metrics.inc_errored();
         close_stream(client);
         metrics.dec_in_flight();
@@ -272,7 +271,7 @@ void handle_one(int client_fd, BackendSet& backend_set, Metrics& metrics,
     bool conn_ok = true;
     auto wr = write_message(handle.fd, req.data(), req.size(), opts.backend_io_timeout_ms);
     if (wr != IoStatus::kOk) {
-        IR_LOG_WARN("backend write failed: %s", io_status_name(wr));
+        IR_LOG_DEBUG("backend write failed: %s", io_status_name(wr));
         conn_ok = false;
         reply_error_tls(ssl, "ERR backend write", opts.client_io_timeout_ms);
         backend_set.release(handle, false);
@@ -285,7 +284,7 @@ void handle_one(int client_fd, BackendSet& backend_set, Metrics& metrics,
     std::vector<std::uint8_t> resp;
     auto rr = read_message(handle.fd, resp, opts.max_payload, opts.backend_io_timeout_ms);
     if (rr != IoStatus::kOk) {
-        IR_LOG_WARN("backend read failed: %s", io_status_name(rr));
+        IR_LOG_DEBUG("backend read failed: %s", io_status_name(rr));
         conn_ok = false;
         reply_error_tls(ssl, "ERR backend read", opts.client_io_timeout_ms);
         backend_set.release(handle, false);
@@ -298,7 +297,7 @@ void handle_one(int client_fd, BackendSet& backend_set, Metrics& metrics,
     auto cw = write_message(client, resp.data(), resp.size(), opts.client_io_timeout_ms);
     backend_set.release(handle, conn_ok);
     if (cw != IoStatus::kOk) {
-        IR_LOG_WARN("client write failed: %s", io_status_name(cw));
+        IR_LOG_DEBUG("client write failed: %s", io_status_name(cw));
         metrics.inc_errored();
         close_stream(client);
         metrics.dec_in_flight();

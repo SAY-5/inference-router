@@ -272,6 +272,16 @@ int main(int argc, char** argv) {
     std::unique_ptr<ir::BackendPool> bpool;
     std::unique_ptr<ir::ThreadPool> tpool;
     std::unique_ptr<ir::Acceptor> acceptor;
+    // HandlerOptions lives in main()'s scope because the acceptor's accept callback
+    // is a lambda that outlives the local block where it's constructed. If we kept
+    // hopts inside the `if (args.spawn_inproc)` block, the by-reference capture in
+    // the outer lambda would dangle as soon as the block ended — fine when
+    // HandlerOptions was three ints (stack memory survived intact long enough), but
+    // breaks the moment the struct grows (e.g. v4's TlsContext* server_tls field
+    // would read garbage and the handler would think TLS is on).
+    ir::HandlerOptions hopts;
+    hopts.client_io_timeout_ms = 30'000;
+    hopts.backend_io_timeout_ms = 30'000;
 
     std::uint16_t target_port = args.port;
 
@@ -293,11 +303,6 @@ int main(int argc, char** argv) {
         topts.max_queue_depth = 16'384;
         tpool = std::make_unique<ir::ThreadPool>(topts);
 
-        ir::HandlerOptions hopts;
-        // Match the bench client's IO budget; queueing under 10k clients can push
-        // individual handler invocations past the 5s default.
-        hopts.client_io_timeout_ms = 30'000;
-        hopts.backend_io_timeout_ms = 30'000;
         ir::Acceptor::Options aopts;
         aopts.host = "127.0.0.1";
         aopts.port = 0;
